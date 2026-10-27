@@ -1,0 +1,1548 @@
+<!doctype html><meta charset=utf-8><title>preview</title><style>body{font-family:"Microsoft JhengHei",sans-serif;max-width:980px;margin:24px auto;line-height:1.6;padding:0 16px} table{border-collapse:collapse;margin:8px 0} td,th{border:1px solid #bbb;padding:4px 8px;vertical-align:top} img{max-width:100%} code{background:#f3f3f3} pre{background:#f3f3f3;padding:8px;overflow:auto}</style><h1>乒乓球平台：方案 A（筆電＋Teensy 4.1）實機程式需求與測試流程</h1>
+<blockquote>
+<p>2026-10-27 整理，給寫這套程式的同學和她的 AI。
+範圍：Teensy 4.1 韌體、筆電端的控制程式和每一個測試工具、每個測試的流程和通過標準、要達到的成績、全部參數、模擬結果。
+機構和列印件（CAD）不在這包裡。這包有哪些檔案見第 14 節。
+標「（建議）」的是整理這份文件時提的做法，還沒跟使用者定案，可以改；其他的是使用者和之前的對話已經定的，或實測、查證過的。</p>
+</blockquote>
+<h2>0. 給 AI 的工作規則（先讀）</h2>
+<ol>
+<li><strong>要做什麼</strong>：寫第 4 節表格裡的程式。照第 9 節的順序一支一支做，每一支都要有第 10 節的自動測試。</li>
+<li><strong>專案程式在 <code>code/</code></strong>（2026-10-27 的快照，沒有 CAD）：</li>
+<li><code>code/ppsim/</code>：模擬。控制器、估測器、運動學都在這裡，<strong>實機直接用同一份</strong>，不要另外寫一套控制器。</li>
+<li><code>code/ppreal/</code>：實機工具。相機那部分已經寫好（另一個對話寫的，原本給樹莓派那套用，Windows 上也能跑）。</li>
+<li><code>code/tests/</code>：現在 116 個測試，在 <code>code/</code> 裡跑 <code>python -m pytest -q tests</code>，約 2 分鐘，<strong>要一直全過</strong>。</li>
+<li><strong>不能改</strong>：<code>ppsim/params.py</code> 的預設值，還有 <code>ppsim/</code> 的控制器和估測器（模擬結果全靠它們）。實機要用不同的值（PWM 300 Hz、提前量、實際的相機），在實機程式裡另外設。</li>
+<li><strong>照現有的格式</strong>：</li>
+<li>紀錄和校正檔照 <code>參考文件/2026-10-27-測試紀錄與監控-design.md</code>，第 3、4、9 節：每次測試一個資料夾，裡面有 <code>meta.json</code>、<code>control.bin</code> 等檔案，校正檔是 <code>calib.json</code>。</li>
+<li>工具的名字和流程照 <code>參考文件/硬體上機檢查清單.md</code>。</li>
+<li>這兩份是照樹莓派那套寫的。Teensy 版跟它們不一樣的地方，寫在本文件第 7、8、9 節。</li>
+<li><strong>先問使用者再做</strong>：新建頂層資料夾、燒錄 Teensy（會蓋掉它原本的程式）、安裝新套件。</li>
+<li><strong>筆電內建的鏡頭會拍到人</strong>：程式只開名字含 <code>PC CAMERA</code> 的相機。<code>ppreal/camera.py</code> 已經這樣做了，不要改成用編號去開別顆。</li>
+<li>給使用者看的字（終端機輸出、報告）用繁體中文。程式碼的註解短就好。</li>
+<li><strong>第一個里程碑是期中</strong>（平衡＋手推）。壓電片、拍球、Teensy 照時間播是期末的事，現在先把介面和封包類型留好。</li>
+</ol>
+<hr />
+<h2>1. 這台機器、要達到什麼</h2>
+<h3>1.1 機器</h3>
+<ul>
+<li>3-RRS 平台：三顆 DS3218 伺服（180° 版）各帶一支 45 mm 的臂，經 100 mm 的連桿撐起平台。平台是 Ø198 mm、8 mm 厚的黑色霧面壓克力，球是 40 mm 的乒乓球。</li>
+<li>平台只有三個自由度：升降和兩軸傾斜。另外三個（前後滑、左右滑、扭轉）由機構連帶決定，<code>ppsim/kinematics.py</code> 會算。</li>
+<li>感測：</li>
+<li>上方相機找球：期中用替代相機，之後換 OV9281。</li>
+<li>平台底面黏一顆 IMU：HW-123，晶片是 MPU-6050。</li>
+<li>平台底面中心貼壓電片，經 LM393 比較器抓撞擊，期末拍球才用。</li>
+<li>控制：筆電算（相機、找球、估測、控制、逆運動學）；Teensy 4.1 出三路伺服 PWM、記撞擊時間、讀 IMU。兩個用 USB 連。</li>
+<li>比賽規則（跟程式有關的）：平台上不能有凸起、表面不能黏、周圍不能有圍欄；收合後要在 20×20×20 cm 以內。收合＝三顆伺服轉到 −60°，平台降到最低。</li>
+</ul>
+<h3>1.2 期中要達到（現在的目標）</h3>
+<ol>
+<li>乒乓球在平台上穩定平衡至少 20 秒。</li>
+<li>用手輕推，可以平衡回來。</li>
+</ol>
+<p>實機的驗收在第 9 節的 A10，跟清單第 9 階段一樣：</p>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>怎樣算過</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>放偏</td>
+<td>球靜止放在離中心 3–4 cm，4 秒內回到中心 1 cm 內（替代相機延遲大的話可能要 5 秒）</td>
+</tr>
+<tr>
+<td>平衡 20 秒</td>
+<td>連做 5 次都沒掉，穩住後在中心 1 cm 內</td>
+</tr>
+<tr>
+<td>手推</td>
+<td>球在中心時往 8 個方向各輕推一次：不掉，而且回到中心 1 cm 內。OV9281：3 秒內；替代相機：5 秒內</td>
+</tr>
+<tr>
+<td>久一點</td>
+<td>連續平衡 2 分鐘，伺服不燙</td>
+</tr>
+</tbody>
+</table>
+<h3>1.3 期末（之後）</h3>
+<ul>
+<li>拍球：讓球固定彈跳，並導回中心。預設目標 15 cm，模擬裡最高穩定約 25 cm。</li>
+<li>接球緩衝：從上方丟下，每跳高度減半，最後停住、轉平衡。</li>
+<li>側拋接球：從正面或背面拋弧線過來。</li>
+<li>這些都要壓電片的撞擊時間。Teensy 最好改成「一次收接下來 30–50 ms 的角度＋時間，照時間播」（第 5.7 節）。</li>
+</ul>
+<h3>1.4 模擬裡的樣子（現在的參數，2026-10-27 重跑）</h3>
+<p><img alt="MuJoCo：放偏拉回＋手推" src="../docs/plan-a-handoff/img/balance_push_mj.gif" /></p>
+<p>MuJoCo（閉鏈多體動力學＋直流馬達伺服模型）。球靜止放在離中心 3.6 cm 的地方，拉回中心。第 5 秒往正面推成 0.25 m/s，球滾到離中心約 67 mm，再被拉回來；推完 3 秒後離中心最遠 5.9 mm。</p>
+<p><img alt="純 Python：替代相機的手推" src="../docs/plan-a-handoff/img/push_subcam_py.gif" /></p>
+<p>純 Python 模擬，相機換成期中用的替代相機（640×480、每秒 30 張、延遲 60 ms）。第 2 秒往正面推成 0.20 m/s，球最遠滾到約 69 mm，3.55 秒後回到 1 cm 內、沒掉。</p>
+<p><img alt="純 Python：從上方丟下，緩衝接住" src="../docs/plan-a-handoff/img/catch_py.gif" /></p>
+<p>純 Python：從上方丟下，每跳減半，約 2.0 秒接到平衡。</p>
+<p><img alt="MuJoCo：拍球" src="../docs/plan-a-handoff/img/juggle_mj.gif" /></p>
+<p>MuJoCo：拍球 4 秒（目標 15 cm），再緩衝、平衡。</p>
+<hr />
+<h2>2. 系統架構</h2>
+<p><img alt="方案 A 系統圖" src="../docs/plan-a-handoff/img/system_teensy.png" /></p>
+<h3>2.1 分工</h3>
+<ul>
+<li><strong>Teensy 只做四件事</strong>：出三路 PWM、壓電片撞擊時用中斷記 <code>micros()</code>、讀 IMU、把這些回報給筆電。</li>
+<li><strong>筆電</strong>跑相機、找球、估測、控制、逆運動學。用的就是模擬那一份 Python（<code>ppsim</code>），不用移植。</li>
+</ul>
+<h3>2.2 筆電上分成三個程式</h3>
+<p>跟樹莓派那套一樣（紀錄規格第 10 節），只是控制程式改成用 USB 跟 Teensy 講話，IMU 也從 Teensy 的回報來。</p>
+<table>
+<thead>
+<tr>
+<th>程式</th>
+<th>做什麼</th>
+<th>寫哪些檔</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>啟動程式</td>
+<td>開測試資料夾、寫 meta、開另外兩個程式、讀鍵盤、印狀態行和摘要；從共享記憶體收控制程式的紀錄寫檔</td>
+<td><code>meta.json</code>、<code>events_*.csv</code>、<code>control.bin</code>、<code>imu.bin</code>、<code>piezo.csv</code>、<code>system.csv</code>、<code>console.log</code>、<code>usb.csv</code></td>
+</tr>
+<tr>
+<td>找球程式</td>
+<td>讀相機、找球，最新的量測放進共享記憶體；另一條執行緒錄影</td>
+<td><code>camera.csv</code>、<code>cam.mjpeg</code>、<code>events_vision.csv</code></td>
+</tr>
+<tr>
+<td>控制程式</td>
+<td>500 Hz 迴圈：讀最新量測和 Teensy 回報，跑 <code>ppsim</code> 的估測器和控制器，算逆運動學和脈寬，用 USB 送 Teensy；每拍一列寫進共享記憶體</td>
+<td>不寫檔</td>
+</tr>
+</tbody>
+</table>
+<p>為什麼要這樣分（2026-10-26 在這台筆電實測：Windows 11、Ryzen 6000、Python 3.12、插電；每拍先空轉 0.6 ms 假裝在算控制，每種 7,500 拍）：</p>
+<ol>
+<li>控制迴圈和找球放在同一個程式的兩條執行緒：一半以上的拍晚超過 2 ms，最壞 28–66 ms。原因是兩條執行緒搶同一把 GIL，Python 每 5 ms 才換手。放成兩個程式：7,500 拍裡只有 0–27 拍晚，最壞 0.9–9 ms。</li>
+<li>等下一拍的方法：</li>
+<li><code>time.sleep</code>：一般優先權最壞 2.2–49 ms；高優先權的 15 秒裡還有 13 拍晚超過 2 ms。<code>timeBeginPeriod(1)</code> 沒有幫助。</li>
+<li>空轉等：一般優先權最壞 1.4–2.7 ms；<strong>高優先權最壞 0.16 ms、沒有一拍晚</strong>，代價是佔滿一個 CPU 核心。</li>
+<li>睡到前 1 ms 再空轉：約 0.7 核，但最壞 1.9 ms（高優先權）到 3.3 ms（一般），餘量很小。</li>
+<li>所以控制程式要用高優先權＋空轉等下一拍。</li>
+<li>控制程式也不寫檔、不印東西：寫檔偶爾會卡幾十 ms。</li>
+<li>限制：每種只跑 15 秒，幾分鐘才一次的卡頓量不到；用電池時要重量。</li>
+</ol>
+<hr />
+<h2>3. 硬體與接線</h2>
+<p><img alt="方案 A 接線圖" src="../docs/plan-a-handoff/img/wiring_teensy.png" /></p>
+<h3>3.1 腳位（Teensy 4.0、4.1 一樣；照板子背面印的號碼接）</h3>
+<table>
+<thead>
+<tr>
+<th>Teensy 的腳</th>
+<th>接到</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2、3、4</td>
+<td>伺服 1、2、3（第 1、2、3 隻腳）的訊號線，各串一顆 330 Ω</td>
+<td>都設 300 Hz、15 bit。2 和 3 共用一個計時器，設一支另一支也跟著變</td>
+</tr>
+<tr>
+<td>GND</td>
+<td>端子台的地</td>
+<td>共地，只拉這一條</td>
+</tr>
+<tr>
+<td>3.3V</td>
+<td>IMU 的 VCC、比較器的 VCC</td>
+<td>3.3V 腳最多給 250 mA，這兩個加起來不到 10 mA</td>
+</tr>
+<tr>
+<td>GND（另一個）</td>
+<td>IMU 的 GND、比較器的 GND</td>
+<td>GND 有好幾個，都是通的</td>
+</tr>
+<tr>
+<td>19（SCL）、18（SDA）</td>
+<td>IMU 的 SCL、SDA</td>
+<td>I²C 位址 0x68</td>
+</tr>
+<tr>
+<td>14</td>
+<td>比較器的 DO</td>
+<td>用中斷記 <code>micros()</code></td>
+</tr>
+<tr>
+<td>VIN</td>
+<td>不接</td>
+<td>Teensy 吃 USB 的電</td>
+</tr>
+<tr>
+<td>13（板上的 LED）或另外一支空腳</td>
+<td>對時 LED（選配，建議）</td>
+<td>Teensy 放在相機拍得到的地方，就直接用板上第 13 腳的 LED；拍不到的話，另外接一顆紅色 5 mm LED 串 330 Ω 到一支空腳（例如第 5 腳）。用途見 A9-8</td>
+</tr>
+</tbody>
+</table>
+<h3>3.2 電的規矩</h3>
+<ol>
+<li>Teensy 的腳只吃 3.3 V（PJRC 原文：the pins are not 5V tolerant）。任何一支腳都不能碰到 5 V 或伺服的 6 V。</li>
+<li>Teensy 吃筆電 USB 的電，VIN 不接。</li>
+<li>伺服的 6 V（6 V 10 A 變壓器）從端子台直接給三顆伺服；端子台的地拉一條到 Teensy 的 GND（共地）。</li>
+<li>三條伺服訊號線各串 330 Ω：伺服接頭插反、6 V 碰到訊號線時，把流進 Teensy 的電流限住。</li>
+<li>DS3218 吃不吃 3.3 V 的訊號，規格表沒寫、也沒找到別人的紀錄，到貨要測（A3-4）。不行就加 74AHCT125：</li>
+<li>VCC 接 Teensy 的 VIN（也就是 USB 的 5 V），最高只能 5.5 V，不能接伺服的 6 V。</li>
+<li>四個 OE 腳接 GND，沒用到的那一路輸入也接 GND。</li>
+<li>三路輸入各接一顆 10 kΩ 到 GND，讓 Teensy 開機那一下輸入不會浮著。</li>
+<li><strong>伺服電源的插頭（或開關）要放在手邊，這就是緊急停止。</strong> 每次開伺服電之前，手先放在它旁邊。</li>
+</ol>
+<h3>3.3 編號和方向</h3>
+<p><img alt="俯視編號圖" src="../docs/plan-a-handoff/img/上機編號圖.svg" /></p>
+<ol>
+<li>正面（前）＝1 號伺服那一側＝ +y＝方位角 90°；右邊＝ +x。</li>
+<li>從上面看逆時針是 1（90°）、2（210°，左後）、3（330°，右後）。伺服 1、2、3 接 Teensy 第 2、3、4 腳。</li>
+<li><code>ppsim</code> 裡三顆伺服的順序也是 1、2、3（<code>legs_deg = (90, 210, 330)</code>）。</li>
+<li>伺服角：臂水平＝0、往上為正，單位弧度（<code>ppsim</code> 的定義）。脈寬加大時臂往上還是往下要量（A4-2），存成 <code>dir</code>。</li>
+<li>傾斜 τ＝(tx, ty)：指向下坡、用 tan 值，球會往 τ 的方向滾（<code>kinematics.tilt_normal</code>）。</li>
+</ol>
+<h3>3.4 相機</h3>
+<ul>
+<li><strong>期中：替代相機「USB2.0 PC CAMERA」</strong></li>
+<li>640×480、每秒 30 張、YUYV。</li>
+<li>一定要手動曝光：自動曝光時相機嫌暗、把曝光拉長，會掉到每秒 10–12 張；<code>--exposure -7</code> 是每秒 29.75 張、沒掉張（2026-10-27 實測，室內白天）。</li>
+<li>視角用 <code>cam fov</code> 量。模擬假設水平 55°、鏡頭在板面上方 45 cm。</li>
+<li>畫面上方要朝正面（1 號那側）。</li>
+<li><strong>之後：OV9281 USB</strong></li>
+<li>1280×720、每秒 120 張、MJPG、全域快門，水平視角約 95–99°。</li>
+<li>在 Windows 上怎麼設，見第 6.4 節。</li>
+</ul>
+<hr />
+<h2>4. 要寫的程式（總表）</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>程式</th>
+<th>在哪跑</th>
+<th>做什麼</th>
+<th>期中要不要</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Teensy 韌體</td>
+<td>Teensy</td>
+<td>收命令出 PWM、斷線回中位、讀 IMU、記撞擊、回報、回 ping</td>
+<td>要</td>
+</tr>
+<tr>
+<td>2</td>
+<td>USB 連線模組</td>
+<td>筆電（給 3–10 用）</td>
+<td>封包編解碼、專門讀的執行緒、對時</td>
+<td>要</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>usb</code> 測試</td>
+<td>筆電</td>
+<td>量 USB 延遲、對時誤差（A1）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>loop</code> 測試</td>
+<td>筆電</td>
+<td>500 Hz 迴圈準不準（A8）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>servo …</code>、<code>motion …</code></td>
+<td>筆電</td>
+<td>送固定脈寬、認伺服、找方向、找中位、量每度幾 µs、範圍、展開、收合、慢動作（A3–A5）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>imu …</code></td>
+<td>筆電</td>
+<td>讀原始值、壓力測試、軸向（A2、A6）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>level …</code></td>
+<td>筆電</td>
+<td>量桌子、用手機校 IMU 零點、自動調平、重複性（A7）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>cam …</code></td>
+<td>筆電</td>
+<td><strong>已經有</strong> <code>list</code>、<code>check</code>、<code>view</code>、<code>rec</code>、<code>fov</code>、<code>calib</code>；要補 <code>cam latency</code>（用 Teensy 點 LED 量相機延遲）（A9）</td>
+<td>要（latency 選做）</td>
+</tr>
+<tr>
+<td>9</td>
+<td>啟動程式＋找球程式＋控制程式（<code>run balance</code>）</td>
+<td>筆電</td>
+<td>平衡、手推（A10）</td>
+<td>要</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>piezo …</code></td>
+<td>筆電</td>
+<td>極性、落球、誤觸發（A11）</td>
+<td>期末</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>report</code>、<code>replay</code></td>
+<td>筆電</td>
+<td>每次測試的成績、圖、疊圖影片；把紀錄照原本的時間餵回 <code>ppsim</code> 重播</td>
+<td><code>report</code> 的相機部分已經有，其他要補</td>
+</tr>
+<tr>
+<td>12</td>
+<td>假的 Teensy</td>
+<td>筆電</td>
+<td>沒接硬體時，讓 2–9 都跑得起來（第 10 節第 5 點）</td>
+<td>要</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>指令的名字照樹莓派那套（建議）：例如 <code>python -m ppreal servo hold 1500</code>、<code>python -m ppreal imu raw</code>。樹莓派上叫 <code>pp …</code>。</li>
+<li>硬體那一層分成兩種（建議）：樹莓派是 PCA9685＋I²C，筆電是 Teensy。上面的工具、校正檔、紀錄兩套共用。</li>
+<li>程式放哪先問使用者（建議韌體放 <code>ppreal/teensy_fw/teensy_fw.ino</code>；Arduino 規定資料夾名要跟 <code>.ino</code> 同名）。</li>
+</ul>
+<hr />
+<h2>5. Teensy 韌體需求</h2>
+<h3>5.1 環境</h3>
+<ol>
+<li>Arduino IDE 2＋Teensyduino 1.59（使用者的筆電已經裝了）。板子選 Teensy 4.1，USB Type 選 Serial。</li>
+<li>編譯（使用者筆電上的 arduino-cli 1.4.1）：
+   <code>"C:/Users/user/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe" compile --fqbn teensy:avr:teensy41 &lt;sketch 資料夾&gt;</code></li>
+<li>燒錄會蓋掉 Teensy 原本的程式，先問使用者。</li>
+</ol>
+<h3>5.2 PWM（三路伺服）</h3>
+<ol>
+<li>第 2、3、4 腳用 <code>analogWriteFrequency(腳, 300)</code>、<code>analogWriteResolution(15)</code>，再用 <code>analogWrite</code> 出。<strong>不要用 Servo／PWMServo 函式庫</strong>（PJRC 寫 PWMServo 只有 50 Hz）。2、3 共用一個計時器，三支都設一次最保險。</li>
+<li>解析度：15 bit 在 300 Hz 時，每格是 3333.3 µs ÷ 32768 ≈ 0.102 µs，比伺服的死區 3 µs 細很多。duty ＝ 脈寬（µs）× 32768 ÷ 3333.33。</li>
+<li>為什麼是 300 Hz：DS3218 規格寫訊號 50–330 Hz。模擬比過「333 Hz、12 bit（樹莓派那套的 PCA9685）」和「300 Hz、15 bit」，成功數和誤差都沒看到差別。</li>
+<li>韌體自己再夾一次脈寬範圍，筆電送錯也不會超出：絕對範圍 500–2500 µs；校正後改用筆電送來的每顆上下限。</li>
+<li>開機先不出 PWM（伺服沒訊號、平台趴著），收到第一個命令才開始出（建議）。工具照清單 4-4 的順序：先送收合位置、再開伺服電源、再慢慢展開，平台才不會被彈起來。</li>
+</ol>
+<h3>5.3 收命令</h3>
+<ol>
+<li>每次控制送一包：三個脈寬（單位 0.1 µs）＋序號＋檢查碼。固定長度、有同步位元組（建議用 CRC-16）。收到錯的包就丟掉、計數。</li>
+<li><strong>0.2 秒沒收到有效命令，就慢慢回到中位</strong>（平台水平），然後停在那裡。</li>
+<li>建議 1 秒內線性回到中位，跟樹莓派那套「按 q，平台 1 秒內慢慢回中位」一樣。</li>
+<li>中位＝校正過的三個 <code>center_us</code>，由筆電在連線時送來；還沒送過就用 1500 µs。</li>
+<li>回中位以後，再收到命令就照命令走。</li>
+</ol>
+<h3>5.4 壓電片</h3>
+<ol>
+<li>第 14 腳接比較器的 DO，用中斷記 <code>micros()</code>。</li>
+<li>觸發的邊緣（上升或下降）看比較器模組，做成可以設定，A11 用手指按平台確認。</li>
+<li>一次撞擊可能觸發好幾次：韌體每一次都記下來回報，由筆電照時間戳濾掉連跳。樹莓派那套也是這樣做，因為硬體去彈跳會讓時間戳變晚。</li>
+<li>期中用不到，但腳位和回報格式先做好。</li>
+</ol>
+<h3>5.5 IMU（HW-123，晶片 MPU-6050）</h3>
+<ol>
+<li>用 <code>Wire</code>（第 18 腳 SDA、第 19 腳 SCL），位址 0x68，400 kHz。線拉到平台上約 30 cm、又靠近伺服線，出錯的話降到 100 kHz。</li>
+<li>上電時晶片在睡眠，要先寫 <code>PWR_MGMT_1</code> 叫醒。讀 <code>WHO_AM_I</code>：MPU-6050 是 0x68，仿品或別的型號會是別的值（例如 MPU-6500 是 0x70）。回報出來就好，不要當成錯誤。</li>
+<li>從暫存器 0x3B 連讀 14 bytes：加速度 xyz、溫度、陀螺儀 xyz。原始 int16 照原樣回報（換算和校正在筆電做），連同讀完那一刻的 <code>micros()</code>。</li>
+<li>讀不到（沒接、線鬆）的時候韌體不能卡住：記錯誤次數、回報，過一陣子再試。</li>
+<li>400 kHz 時讀一次約 0.4–0.5 ms，<code>Wire</code> 讀的時候會等它讀完。讀的頻率建議 100–250 Hz。</li>
+</ol>
+<h3>5.6 回報、ping、LED</h3>
+<ol>
+<li>定時回報這幾種：</li>
+<li>狀態：自己的 <code>micros()</code>、最後收到的命令序號、現在出的三個脈寬、有沒有在回中位、各種錯誤的次數。</li>
+<li>IMU 的每一筆。</li>
+<li>壓電片的每一次。</li>
+<li>ping 的回覆。</li>
+<li>每一包都是固定長度、有同步位元組和檢查碼，筆電用固定長度的 <code>read</code> 收。</li>
+<li>寫之前先看 <code>Serial.availableForWrite()</code> 夠不夠，不夠就丟掉這包、計數，不能卡住。筆電沒在讀的時候，<code>Serial.write()</code> 最多卡 120 ms，之後的資料直接丟掉，等筆電開始收才恢復。</li>
+<li>寫完呼叫 <code>Serial.send_now()</code>。不呼叫的話，沒填滿 2048 bytes 傳送緩衝的資料，要等最後一次寫入後 75 µs 才送出。</li>
+<li>ping：筆電送一個編號，Teensy 回這個編號＋它收到時的 <code>micros()</code>（對時用，第 6.3 節）。</li>
+<li>LED（選配）：收到命令就點亮對時 LED，回報點亮那一刻的 <code>micros()</code>。<code>cam latency</code> 和手機錄影對時用。</li>
+</ol>
+<h3>5.7 期末再做：照時間播</h3>
+<p>期中每次直接送就好。拍球要準時的話，改成一次送「接下來 30–50 ms 的角度＋Teensy 的時間」，讓 Teensy 照時間播，筆電偶爾卡一下也打不歪。封包現在就留一個類型給它。</p>
+<hr />
+<h2>6. 筆電端需求</h2>
+<h3>6.1 控制程式（500 Hz）</h3>
+<ol>
+<li><strong>高優先權</strong>：<code>SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)</code>。</li>
+<li><strong>先把 ctypes 的型別設好</strong>：<code>GetCurrentProcess</code> 回傳 HANDLE，<code>SetPriorityClass</code> 的參數是 HANDLE 和 DWORD。</li>
+<li>設完用 <code>GetPriorityClass</code> 讀回確認，設不到就停。</li>
+<li>不設型別的話，64 位元的 Python 會靜靜失敗，還是一般優先權（2026-10-26 量測時踩過）。</li>
+<li><code>量測程式/loop_timing.py</code> 的 <code>high_priority()</code> 就是這樣寫的。</li>
+<li><strong>空轉等下一拍</strong>：<code>while time.perf_counter() &lt; target: pass</code>。</li>
+<li>每一拍：拿最新的相機量測和 Teensy 回報，跑估測器和控制器，得到三個伺服角，換成脈寬送給 Teensy。接法照 <code>ppsim/sim.py</code> 的 <code>Runner</code>：</li>
+<li><code>ctrl = Controller(cfg, Platform(cfg.geom), juggle_until=0.0)</code></li>
+<li><code>est = Estimator(cfg, 相機模型, ctrl.plate_at)</code>，再 <code>ctrl.est = est</code></li>
+<li>每一張新的量測：<code>est.on_camera(拍攝時刻, 球的位置, 現在)</code>；每一次撞擊：<code>est.on_piezo(撞擊時刻)</code></li>
+<li>每一拍：<code>th = ctrl.update(現在)</code>，回傳三個伺服角（弧度）</li>
+<li>時間一律用「開始後幾秒」，全部同一個時鐘。</li>
+<li><code>相機模型</code> 要有 <code>meas_cov(p)</code>，估測器拿它算量測雜訊。用 <code>ppsim.sensors.Camera</code>，參數填實際的相機（期中是替代相機，第 11 節有模擬用的值）。</li>
+<li>相機只給 x、y 的時候（替代相機在正上方、球貼著平台），z 建議用估測器以為的平台平面，算出球心該在的高度（<code>est.plane(t)</code>），不要填常數（建議）。</li>
+<li>原因：<code>estimator.py</code> 的 <code>on_camera</code> 裡有一段「球跳起來了」的判斷，平台斜的時候常數 z 可能讓它誤判。</li>
+<li>期中沒有壓電片：<code>cfg.piezo.enabled = False</code>。</li>
+<li>實機的設定在程式裡改，不改 <code>params.py</code>：</li>
+<li><code>cfg.servo.pwm_hz = 300</code>、<code>cfg.servo.pwm_counts = 32768</code></li>
+<li><code>cfg.control.lead</code>：公式值＋USB 單程延遲（第 6.3 節）</li>
+<li><code>cfg.camera</code>：換成實際的相機</li>
+<li>角度換脈寬：<code>us = center_us + dir × 角度（度）× us_per_deg</code>。角度 &gt; 0 用 <code>us_per_deg_up</code>，&lt; 0 用 <code>us_per_deg_down</code>，再夾在每顆的上下限內。</li>
+<li>控制程式不寫檔、不印東西：每一拍把一列（<code>control.bin</code> 的欄位）寫進共享記憶體的環形緩衝，由啟動程式收。</li>
+<li>鍵盤由啟動程式讀：空白鍵＝記「我推了」，<code>m</code>＝打一句備註，<code>q</code>＝停（平台 1 秒內慢慢回中位）。</li>
+<li>控制程式當掉的話：Teensy 0.2 秒沒命令就自己回中位（韌體做的），啟動程式記下來、收尾。</li>
+<li>運算量參考：控制＋估測在這台筆電每秒吃約 0.3 秒 CPU，不用改 numba／C++。</li>
+</ol>
+<h3>6.2 USB 連線（pyserial）</h3>
+<ol>
+<li>找 Teensy：USB VID 0x16C0。</li>
+<li><code>write_timeout</code> 設 0.005–0.01 秒。不設的話 <code>write</code> 會等驅動做完；逾時會丟 <code>SerialTimeoutException</code>，要接住。</li>
+<li><strong>控制迴圈裡不要呼叫 <code>flush()</code></strong>：它沒有逾時，資料沒送完就每次睡 50 ms 再看，Teensy 不收的話會一直卡。</li>
+<li>另開一條執行緒，專門用固定長度的 <code>read</code> 收回報，收到當下記 <code>perf_counter_ns()</code>。筆電要一直有執行緒在讀，不然 Teensy 寫的時候會卡、會丟資料。</li>
+<li>延遲（2026-10-26 查）：</li>
+<li>找到的實測都在 Linux、都經過 USB 2.0 hub。2016 年有人量到來回平均 0.15 ms、最大 0.9 ms（同一則裡不經 hub 是平均 2 ms，板子型號沒寫）；2020 年 Teensy 4.0 傳 512 bytes，中位數約 0.25 ms。</li>
+<li>Windows 上 Teensy 4 的數字沒找到。早期也有人用 Teensy 3.2 量到 2–10 ms。</li>
+<li>所以<strong>一定要自己量</strong>（A1），先假設偶爾會卡幾 ms。</li>
+</ol>
+<h3>6.3 對時：把 Teensy 的 <code>micros()</code> 換成筆電的時間</h3>
+<ol>
+<li>筆電每 20–100 ms 送一個 ping，Teensy 回它收到時的 <code>micros()</code>。把那一刻當成筆電「送出和收到的中點」，誤差最多是來回時間的一半。</li>
+<li>只留來回最快的那些樣本，用最近 10–60 秒做直線擬合，補兩邊時鐘的快慢差。</li>
+<li><code>micros()</code> 約 71.6 分鐘會繞回 0，換算前先接起來。</li>
+<li>壓電片、IMU 的時間都用這條線換成筆電的 <code>perf_counter_ns()</code>；原始的 <code>micros()</code> 也記進紀錄，之後可以重算。</li>
+<li><strong>提前量</strong>：</li>
+<li><code>control.lead</code> 一設，就取代 <code>controller.py</code> 裡的自動公式 <code>1/kp + deadtime + 0.5/pwm_hz</code>，不會再自動算。</li>
+<li>300 Hz 時公式值是 22.33 ms（模擬預設 333 Hz 時是 22.17 ms）。</li>
+<li>實機設成 22.33 ms＋USB 單程延遲。命令只走單程，用 A1 量到的來回中位數的一半（建議）。</li>
+<li>相機那端的時間誤差可能更大：讓 LED 閃一下，相機拍到、Teensy 也記時間，比對兩邊（<code>cam latency</code>）。</li>
+</ol>
+<h3>6.4 找球程式（相機）</h3>
+<ol>
+<li>直接用 <code>ppreal</code> 現成的：</li>
+<li><code>camera.py</code>：Windows 用 DSHOW，只開 PC CAMERA。</li>
+<li><code>balldetect.py</code>：在黑色霧面平台上找白球。</li>
+<li><code>calib.py</code>：像素換成平台座標（mm）。</li>
+<li><code>camtool.py</code> 的錄影管線：找球絕不等錄影，寫檔跟不上就跳過那張不存。</li>
+<li>量測交給控制程式：用共享記憶體放「最新一張」的拍攝時刻、x、y、有沒有找到。</li>
+<li>DSHOW 不給每張的時間戳。<code>read()</code> 回來就記 <code>perf_counter_ns()</code>，拍攝時刻＝讀到的時刻－相機延遲。相機延遲先用假設值，再用 <code>cam latency</code> 量。</li>
+<li>換 OV9281 的時候（2026-10-26 查，還沒實機試過）：</li>
+<li>要明講用 MJPG。DSHOW 沒指定格式時會先試別的格式（清單裡 YUY2 排在 MJPG 前面），同元件的別款模組就有每秒只有 10–30 張的 YUY2。</li>
+<li>用 <code>cv2.CAP_DSHOW</code>。設定順序：FPS、寬、高，最後才設 FOURCC（MJPG）；設完讀回格式和尺寸確認。這個順序是照 OpenCV 4.x 的 DSHOW 原始碼推的（設寬高或 FPS 時會重開相機，之前設的格式不會帶過去）。</li>
+<li><code>CAP_PROP_FPS</code> 讀回來的只是你要求的值，實際每秒幾張要自己數。</li>
+<li>曝光在 Windows 上的單位是 2 的次方秒、只能整數（−9 約 2 ms、−10 約 1 ms）。<code>CAP_PROP_AUTO_EXPOSURE</code> 設 0.25 是手動，但這個值讀不回來，要讀回曝光值確認。</li>
+<li>最短能設到多少官方沒寫，插上先用 <code>CAP_PROP_SETTINGS</code> 叫出屬性頁看下限。</li>
+</ol>
+<h3>6.5 啟動程式</h3>
+<p>照紀錄規格第 4、6 節：
+1. 開測試資料夾、寫 <code>meta.json</code>。開始時寫 <code>running</code>，正常結束才改成 <code>done</code>。
+2. 每 0.5 秒印一行狀態，跑完印摘要，再問「結果？」。
+3. 每秒記一列 <code>system.csv</code>。Windows 上讀不到 CPU 溫度就留空。</p>
+<hr />
+<h2>7. 校正檔 <code>calib.json</code>（Teensy 版）</h2>
+<p>格式照紀錄規格第 9 節，把 <code>pca9685</code> 那段換成 <code>teensy</code>，再多一段 <code>usb</code>（建議）：</p>
+<pre><code class="language-json">{
+  &quot;version&quot;: 1,
+  &quot;teensy&quot;: {&quot;pins&quot;: [2, 3, 4], &quot;pwm_hz&quot;: 300, &quot;resolution_bits&quot;: 15,
+             &quot;piezo_pin&quot;: 14, &quot;piezo_edge&quot;: null, &quot;firmware&quot;: &quot;版本字串&quot;},
+  &quot;usb&quot;: {&quot;rtt_median_ms&quot;: null, &quot;rtt_p99_ms&quot;: null, &quot;rtt_max_ms&quot;: null, &quot;one_way_ms&quot;: null},
+  &quot;servo&quot;: [
+    {&quot;leg&quot;: 1, &quot;pin&quot;: 2, &quot;dir&quot;: 1, &quot;center_us&quot;: 1500.0, &quot;center_us_jig&quot;: null,
+     &quot;us_per_deg_up&quot;: 11.11, &quot;us_per_deg_down&quot;: 11.11, &quot;min_us&quot;: 500, &quot;max_us&quot;: 2500},
+    {&quot;leg&quot;: 2, &quot;pin&quot;: 3, &quot;...&quot;: &quot;...&quot;},
+    {&quot;leg&quot;: 3, &quot;pin&quot;: 4, &quot;...&quot;: &quot;...&quot;}
+  ],
+  &quot;imu&quot;: {&quot;...&quot;: &quot;跟樹莓派版一樣：axis_map、zero_g、who_am_i、temp_c_at_zero&quot;},
+  &quot;camera&quot;: {&quot;...&quot;: &quot;跟樹莓派版一樣：device、width、height、map、platform_r_px&quot;},
+  &quot;table&quot;: {&quot;tilt_fb_deg&quot;: null, &quot;tilt_lr_deg&quot;: null},
+  &quot;history&quot;: []
+}
+</code></pre>
+<ul>
+<li><code>center_us</code> 是目前在用的中位（調平後），<code>center_us_jig</code> 是 A4-3 用治具量的那組，留著對照。</li>
+<li>每次修改在 <code>history</code> 加一筆，也在當次的事件檔記一筆 <code>calib</code>。</li>
+<li>檔案放在 <code>out/real/calib.json</code>（筆電）。每次測試抄一份進 <code>meta.json</code>。</li>
+</ul>
+<hr />
+<h2>8. 紀錄（跟樹莓派版不一樣的地方）</h2>
+<ol>
+<li>檔案和欄位照紀錄規格第 4 節。時鐘是筆電的 <code>perf_counter_ns()</code>，<code>meta.json</code> 的 <code>clock</code> 寫 <code>perf_counter</code>。</li>
+<li>Teensy 來的資料（IMU、壓電片、狀態），每一筆記兩個時間：原始的 <code>micros()</code>（<code>t_teensy_us</code>）和換算後的 <code>t_ns</code>。</li>
+<li>多一個 <code>usb.csv</code>（建議）：每個 ping 的送出時刻、收到時刻、Teensy 的 <code>micros()</code>、來回時間。事後可以重做對時，也看得出延遲有沒有突然變大。</li>
+<li><code>control.bin</code> 的 <code>us1/2/3</code> 是筆電送出的脈寬；Teensy 回報的「現在在出的脈寬」另外記，才看得出有沒有掉命令、有沒有在回中位。</li>
+</ol>
+<hr />
+<h2>9. 測試流程（照順序做，前一步沒過不要往下）</h2>
+<p>每一步都看三件事：做什麼、怎樣算過、記什麼。寫「同清單 x-y」的步驟，細節（為什麼這樣做、例子）在 <code>參考文件/硬體上機檢查清單.md</code> 的那一步。</p>
+<h3>A0 準備</h3>
+<ol>
+<li>Arduino IDE＋Teensyduino；Python 3.12，套件要有 numpy 2.x、matplotlib、opencv-python（使用者的筆電是 5.0）、pyserial 3.5、pytest、Pillow；跑 MuJoCo 模擬另外要 mujoco 3.14。</li>
+<li>手邊要有：三用電表、游標卡尺、紙膠帶和簽字筆、校正治具 P7、乒乓球、能顯示到 0.1° 的手機水平儀 app。</li>
+<li>伺服電源的插頭放在手邊。</li>
+</ol>
+<h3>A1 燒韌體、量 USB 延遲和對時（程式 3）</h3>
+<ol>
+<li>燒正式的韌體（先問使用者）。</li>
+<li><code>usb</code>：照控制迴圈的節奏每 2 ms 送一包、送 10 秒（5000 包），用跟控制程式一樣的高優先權。</li>
+<li>怎樣算過（建議）：5000 包一包都沒掉。印出：</li>
+<li>來回延遲的中位數、p99、p99.9、最大值，超過 1 ms、2 ms 各幾次；</li>
+<li>兩邊時鐘的快慢差（ppm）；</li>
+<li>只用來回最快 10% 的樣本做對時，殘差有多大。</li>
+<li>記（自動進校正檔）：來回中位數、p99、最大值；提前量照第 6.3 節加上單程延遲。</li>
+<li>插電、用電池各量一次；找球程式開著錄影時再量一次（建議）。</li>
+<li>正式韌體寫好之前，可以先用 <code>量測程式/latency_test.ino</code>＋<code>usb_rtt.py</code> 量（2026-10-27 重新編譯過，還沒接過 Teensy）。</li>
+</ol>
+<h3>A2 接線、通電（伺服先不插）</h3>
+<ol>
+<li>伺服電源不接負載，量電壓：5.9–6.3 V（用 5 V 的備案電源是 4.9–5.3 V）。（同清單 1-1）</li>
+<li><strong>全部斷電時</strong>用三用電表的蜂鳴檔量：端子台的地和 Teensy 的 GND 要通。（同清單 1-2）</li>
+<li>Teensy 插上 USB 以後，量 IMU 和比較器的 VCC 對 GND：都是 3.3 V。看到 5 V 就馬上拔掉。</li>
+<li><code>imu raw</code>（同清單 1-7）：</li>
+<li>先讀晶片型號 <code>WHO_AM_I</code>，0x68 是 MPU-6050；別的值先記下來，不用緊張。</li>
+<li>靜止時加速度合計在 0.88–1.12 g，溫度讀得到而且穩定，連讀 1000 次沒有錯誤。</li>
+</ol>
+<h3>A3 單顆伺服（還沒裝舵盤和臂；同清單第 2 階段）</h3>
+<ol>
+<li>三顆伺服用紙膠帶標 1、2、3。插在伺服延長線上（紅線和黑線已經剪開接到端子台），訊號線接 Teensy 第 2、3、4 腳。插拔時伺服電源要關著。</li>
+<li><code>servo hold 1500</code>（三路都送 1500 µs），<strong>然後</strong>才開伺服電源：三顆都停住、不抖、不嗡嗡叫。</li>
+<li><code>servo id</code>：依序讓第 2、3、4 腳的伺服慢慢轉一下，確認動的是 1、2、3 號。</li>
+<li>3.3 V 的訊號夠不夠：<code>servo sweep</code></li>
+<li>每顆從 500 慢慢掃到 2500 µs 再回來，兩端都走得到。</li>
+<li>停著的時候不會每隔幾秒抽一下。</li>
+<li>三顆一起停在 1500 µs 放 5 分鐘，摸起來不燙。</li>
+<li>插著伺服時，量一下訊號線的高電位。</li>
+<li>有一項不行就加 74AHCT125（第 3.2 節），再測一次。</li>
+</ol>
+<h3>A4 伺服裝臂（還沒接連桿；同清單第 3 階段）</h3>
+<ol>
+<li>送 1500 µs，裝舵盤和伺服臂，選最接近水平的那一齒。</li>
+<li><code>servo dir &lt;n&gt;</code>：讓第 n 顆加 100 µs，問臂往上還是往下，存成 <code>dir</code>。三顆應該一樣。</li>
+<li><code>servo center &lt;n&gt;</code>（校正治具 P7）：</li>
+<li>治具放在肘關節正下方，治具和伺服座的底要在同一個平面。一根 M4 螺絲穿過肘關節的套筒，兩端架在治具兩邊。</li>
+<li>2026-10-27 起肘關節改用 F684ZZ＋M4，治具要用新印的那版（架 M4）。<code>參考文件/硬體上機檢查清單.md</code> 3-3、3-4 寫的 M3 是舊的。</li>
+<li>方向鍵 ↑↓ 每次 1 µs、PgUp／PgDn 每次 5 µs，↑ 永遠是臂往上。調到螺絲剛好平貼治具兩邊。</li>
+<li>最後一下要從下往上停，三顆都這樣，齒輪的間隙才會吃在同一邊。</li>
+<li>按 Enter 存成 <code>center_us</code>。正常在 1500 ± 80 µs 內。</li>
+<li><code>servo scale &lt;n&gt;</code>：<strong>先把治具拿開</strong>（工具送脈寬前要再問一次）。</li>
+<li>M4 螺絲留在套筒裡當量測點。臂停在中位 +300 µs、−300 µs，用游標卡尺量「桌面到 M4 螺絲中心」的高度，照提示輸入，算出往上、往下各每度幾 µs。</li>
+<li>中位時是 50 mm。180° 版的 DS3218 約每度 11 µs，±300 µs 大約 ±27°，高度約 70 mm 和 30 mm。</li>
+<li>算出來接近每度 7.4 µs，表示買到的是 270° 版，要跟使用者說。</li>
+<li><code>servo range &lt;n&gt;</code>：臂從 −45° 慢慢擺到 +45° 再回中位，不能碰到伺服座或桌面。</li>
+<li>記（自動）：每顆的 <code>dir</code>、<code>center_us</code>、往上和往下的每度幾 µs。</li>
+</ol>
+<h3>A5 裝上底板、連桿、平台（同清單第 4 階段）</h3>
+<ol>
+<li><strong>第一次帶平台通電</strong>：先 <code>servo hold fold</code>（送收合位置 −60°，平台沒電時就趴在這附近），再開伺服電源，再 <code>motion unfold</code>（3 秒慢慢升到中位）。直接送中位的話，三顆會全速轉 60°，把平台彈上來。</li>
+<li><code>motion slow</code>：</li>
+<li>先往正面抬 5°（正面邊緣大約高 9 mm），問「正面有沒有變高？」。沒有的話停下來，三顆的 <code>dir</code> 可能全反了。</li>
+<li>再往右抬 5°，問右邊（3 號那側）有沒有變高。</li>
+<li>然後升降 ±10 mm、往 8 個方向各傾斜 3°，每個動作 5 秒。</li>
+<li>最後全範圍：升降 ±22 mm、往 8 個方向傾斜 8°。看線有沒有被拉到、零件有沒有碰到。</li>
+<li>停在中位 5 分鐘：伺服摸起來溫的可以，燙手不行。</li>
+<li><code>motion fold</code>：三顆轉到 −60°，平台降到最低。</li>
+</ol>
+<h3>A6 IMU（同清單第 5 階段）</h3>
+<ol>
+<li><code>imu raw</code>（平台停在中位）：加速度合計在 0.88–1.12 g；陀螺儀靜止時每軸在 ±20 °/s 內。</li>
+<li><code>imu stress</code>：平台慢慢晃 1 分鐘，同時一直讀 IMU，錯誤 0 次。有錯的話先把 IMU 的線綁離伺服線；還有錯就把 I²C 降到 100 kHz。</li>
+<li><code>imu axes</code>：讓平台往正面抬 5°、往右抬 5°，看 IMU 哪個軸在變、正負號，存成 <code>axis_map</code>。工具要檢查三個軸是右手座標。</li>
+<li>暖機：IMU 通電 5 分鐘以上，溫度 1 分鐘內變不到 0.5 °C，再做 A7。</li>
+</ol>
+<h3>A7 調平（同清單第 6 階段）</h3>
+<p>先用手機校 IMU 的原因：MPU-6050 的 X、Y 軸零點典型誤差 ±50 mg，等於平台歪 2.9° 都可能讀成 0°。手機可以在平台上單獨轉 180°，它自己的誤差才抵消得掉。</p>
+<ol>
+<li><code>level table</code>：手機平放在桌面上，上緣朝正面，讀前後、左右兩個數字；原地轉 180° 再讀一次。兩個方向都要在 1° 以內，不然換一張比較平的桌子。</li>
+<li><code>level imu-zero</code>：手機放在平台正中間，上緣朝正面，輸入兩個數字（工具同時讀 IMU）；轉 180° 再輸入一次。工具算出平台真正歪多少、IMU 自己差多少。扣掉桌子的傾斜以後，組裝誤差要在 1° 以內。</li>
+<li><code>level auto</code>：</li>
+<li>每 2 秒讀一次 IMU 平均，算前後、左右各歪多少，換算三顆伺服各要改幾 µs。</li>
+<li><strong>每次每顆最多改 3 µs</strong>，停 1 秒再量，一直重複。</li>
+<li>前後、左右都在 <strong>0.1°</strong> 以內就停（伺服死區 3 µs 大約就是 0.1°）。停下來 30 秒後再量，還要在 0.15° 內。</li>
+<li>工具自己停的情況：扣掉桌子以後任何一顆累積改超過 25 µs（組裝差太多，先調連桿長度）；調了 40 次還沒進 0.1°。</li>
+<li>手機複查（同清單 6-3）：前後、左右都在 0.15° 以內。</li>
+<li><code>level repeat</code>：平台隨機傾斜到 5° 再回中位，重複 10 次，每次回來都讀 IMU。最大減最小要在 0.1° 以內。</li>
+</ol>
+<h3>A8 筆電的 500 Hz 迴圈（程式 4）</h3>
+<ol>
+<li><code>loop</code>：用控制程式同一份等待方法（高優先權、讀回確認、空轉等）跑 1 分鐘，每拍先空轉 0.6 ms 假裝在算控制。找球程式在錄影時再跑一次。</li>
+<li>怎樣算過（建議）：1 分鐘裡沒有一拍晚超過 2 ms。記中位數、p99、最大值。插電跑，用電池要重量。</li>
+<li>參考：2026-10-26 同一台筆電，高優先權＋空轉，15 秒裡最壞 0.16 ms、沒有一拍晚。</li>
+<li><code>量測程式/loop_timing.py</code>、<code>loop_gil.py</code> 是當時的量測程式，可以拿來改。</li>
+</ol>
+<h3>A9 相機（替代相機；同清單第 7 階段，這幾支工具已經寫好）</h3>
+<p>指令都在專案資料夾裡打，例如 <code>.venv/Scripts/python -m ppreal cam check</code>。</p>
+<ol>
+<li>先用貼紙把筆電內建的鏡頭蓋起來。插上替代相機，關掉 Windows 的「相機」App、Teams、瀏覽器的視訊。<code>cam list</code> 要看得到名字含 <code>PC CAMERA</code> 的那顆。</li>
+<li><code>cam check --exposure -7</code>：每秒 29 張以上、沒有掉張。</li>
+<li>偶爾一個 45–50 ms 的間隔是 Windows 讀畫面的時間抖動，不是掉張；真的掉一張會接近 66 ms。</li>
+<li><code>cam view</code>＋<code>cam fov --d … --w … --h … --mount …</code>：量視角、算要架多高。</li>
+<li>畫面短邊要涵蓋 25 cm：鏡頭到平台上表面的高度 ≥ 25 × D ÷ H（D＝離牆距離，H＝畫面在牆上的高度），再多留 5–10 cm。</li>
+<li>架相機：支架不要碰到底板，鏡頭朝正下方、對準平台中心，畫面上方對準正面。</li>
+<li><code>cam calib</code>：讓工具找平台的圓邊，算出中心和比例；再把球依序放在中心、正面邊緣、正右邊，定方向、檢查畫面有沒有左右翻。</li>
+<li><code>cam view</code> 看找球：球放中心和前後左右靠邊 4 個位置都要一直找得到；正負號要對（前面 y 是正、右邊 x 是正）；球不動時數字跳動在 0.5 mm 以內。</li>
+<li><code>cam rec 60 --note "這次在測什麼"</code>：60 秒要有 1800 張左右（差 1% 以內）、沒有掉張。跑完照它印的那行跑 <code>report</code>，看 <code>summary.md</code>、<code>timeline.png</code>、<code>overlay.mp4</code>。</li>
+<li>（選做）<code>cam latency</code>（<strong>要寫</strong>）：Teensy 點亮 LED 20 次，算「點亮」到「畫面看到亮」要幾 ms。這就是相機延遲，填進實機程式的 <code>camera.latency</code>。</li>
+<li>球放著不控制：平台停在水平、球輕放中心，追 10 秒。一直往同一邊滾表示那邊低，記下方向。</li>
+</ol>
+<h3>A10 開平衡（期中目標；程式 9；同清單第 9 階段）</h3>
+<ol>
+<li>開跑前自動檢查（<code>preflight</code>）：校正檔讀得到、Teensy 連得上（ping 正常、韌體版本對）、IMU 正常、相機每秒 29 張以上、控制程式的優先權有設到、硬碟空間夠。伺服電源的插頭在手邊。</li>
+<li>第一次：球放中心，<code>run balance --note "第一次"</code>，跑 30 秒。平台開始來回晃、而且越晃越大，就馬上按 <code>q</code>（或拔伺服電源）。</li>
+<li>放偏：球靜止放在離中心 3–4 cm，4 秒內回到中心 1 cm 內（替代相機可能要 5 秒）。</li>
+<li>平衡 20 秒（期中第 1 項）：連做 5 次，5 次都沒掉，穩住後在中心 1 cm 內。</li>
+<li>手推（期中第 2 項）：球在中心時往 8 個方向各輕推一次，<strong>推的同時按空白鍵</strong>。每推一次，狀態行下面印出這次推了每秒幾 cm、滾最遠多遠、幾秒回來。不掉，而且回到中心 1 cm 內（OV9281：3 秒內；替代相機：5 秒內）。</li>
+<li>連續平衡 2 分鐘，看伺服的溫度。</li>
+<li>每次跑完問「結果？」，使用者打的那句話存進那次的紀錄。</li>
+</ol>
+<h3>A11 壓電片（期末；BOM 第 5 節第 14 步）</h3>
+<ol>
+<li>極性（伺服先不通電）：手指按一下平台中心，訊號要在「按下去」那一下出現；放開才出現，就把壓電片的兩條線對調。</li>
+<li>落球（伺服先不通電）：球從 10、25、50 cm 高放開，落在中心、離中心 4 cm、7.5 cm、9 cm，各 10 次，記有沒有觸發。中心到 4 cm 要每次都觸發；7.5 cm 那圈抓不到是預料中的。</li>
+<li>誤觸發：伺服通電、不放球，讓平台做幾下快速上下和傾斜，不應該觸發。會觸發就把比較器的門檻調高一點，或讓壓電片的線離伺服線遠一點。</li>
+<li>門檻調到「落球都觸發、空跑不觸發」的中間。</li>
+</ol>
+<h3>A12 收工</h3>
+<p><code>motion fold</code>（平台降到最低），然後關伺服電源，再拔 USB。</p>
+<hr />
+<h2>10. 不用接硬體就要過的測試（寫進 <code>tests/</code>）</h2>
+<ol>
+<li><strong>封包編解碼</strong>：</li>
+<li>Python 編、Python 解，來回一樣。</li>
+<li>檢查碼錯、長度錯、前面夾垃圾位元組，都要能丟掉、重新對齊。</li>
+<li>跟韌體用同一組測試向量（例如固定的位元組串和它的 CRC）。韌體那邊可以用 C++ 的 <code>static_assert</code>，或把韌體裡不靠 Arduino 的部分（封包、回中位、壓電片的緩衝）寫成純 C++，在筆電上編成執行檔或 DLL 來測（建議）。使用者的筆電有 Visual Studio Build Tools 2022（MSVC 14.42）。</li>
+<li><strong>對時</strong>：用造出來的資料測。</li>
+<li>兩邊時鐘差一個固定值，再加上快慢差（例如 ±50 ppm）。</li>
+<li>來回時間大部分 0.1–0.3 ms，偶爾幾 ms。</li>
+<li><code>micros()</code> 中途繞回 0。</li>
+<li>擬合出來的換算誤差要在 ±50 µs 內（建議），慢的樣本不能把線拉歪。</li>
+<li><strong>斷線回中位</strong>：命令停了 0.2 秒以後開始回中位、1 秒內到、之後停住；途中來了新命令就照新命令走；脈寬永遠在上下限內。</li>
+<li><strong>角度換脈寬</strong>：<code>dir</code>、往上往下不同的每度 µs、上下限。</li>
+<li><strong>假的 Teensy＋模擬</strong>（使用者要求：沒接硬體時，筆電端要能用模擬或假的序列埠跑起來）：</li>
+<li>真實世界用 <code>ppsim</code> 的純 Python 版（<code>plant.PyPlant</code>）。</li>
+<li>假的序列埠後面接「韌體的邏輯＋模擬的 USB 延遲和時鐘差」，相機量測用 <code>sensors.Camera</code> 造。</li>
+<li>整套控制程式（同一份程式碼）要過跟 <code>tests/test_control.py</code> 一樣的標準：球放偏 3.6 cm，4 秒後連續 20 秒都在中心 1 cm 內；8 個方向推 0.25 m/s，不掉、推完 3 秒後在 1 cm 內。</li>
+<li>用虛擬時間跑，不用等真的時間。</li>
+<li><strong>韌體編譯通過</strong>（第 5.1 節的指令）。</li>
+<li><strong>現有的 116 個測試照樣全過。</strong></li>
+</ol>
+<hr />
+<h2>11. 全部參數（<code>ppsim/params.py</code>，2026-10-27）</h2>
+<p>程式裡一律是 SI 單位（公尺、秒、弧度），下表換成 mm、°、ms 方便看。<strong>標「假設」的沒有查到可信來源，實機要自己量。</strong> 改規格只改 <code>params.py</code>。</p>
+<h3>11.1 幾何 <code>Geometry</code></h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>plate_diameter</code></td>
+<td>198 mm</td>
+<td>平台直徑（收合要在 20 cm 內）</td>
+</tr>
+<tr>
+<td><code>plate_thickness</code></td>
+<td>8 mm</td>
+<td>壓克力厚度</td>
+</tr>
+<tr>
+<td><code>r_p</code></td>
+<td>80 mm</td>
+<td>平台三個球頭所在圓的半徑</td>
+</tr>
+<tr>
+<td><code>arm</code></td>
+<td>45 mm</td>
+<td>伺服臂長</td>
+</tr>
+<tr>
+<td><code>rod</code></td>
+<td>100 mm</td>
+<td>連桿中心距</td>
+</tr>
+<tr>
+<td><code>z_shaft</code></td>
+<td>50 mm</td>
+<td>伺服軸離底板的高度</td>
+</tr>
+<tr>
+<td><code>joint_to_surface</code></td>
+<td>18 mm</td>
+<td>球頭中心到平台上表面</td>
+</tr>
+<tr>
+<td><code>legs_deg</code></td>
+<td>90°、210°、330°</td>
+<td>三隻腳的方位角（1、2、3 號）</td>
+</tr>
+<tr>
+<td><code>servo_limit_deg</code></td>
+<td>60°</td>
+<td>伺服角的上限（±）</td>
+</tr>
+<tr>
+<td><code>heave_limit</code></td>
+<td>±22 mm</td>
+<td>控制器允許的升降行程</td>
+</tr>
+<tr>
+<td><code>arm_outward</code></td>
+<td>True</td>
+<td>臂朝外、伺服靠中間（收合改版）</td>
+</tr>
+<tr>
+<td><code>r_b</code>（算出來的）</td>
+<td>35 mm</td>
+<td>伺服軸所在圓的半徑＝<code>r_p</code>－<code>arm</code></td>
+</tr>
+<tr>
+<td><code>z_joint0</code>（算出來的）</td>
+<td>150 mm</td>
+<td>中立時球頭中心的高度</td>
+</tr>
+<tr>
+<td><code>z_surface0</code>（算出來的）</td>
+<td>168 mm</td>
+<td>中立時平台上表面離底板的高度</td>
+</tr>
+</tbody>
+</table>
+<p>中立姿態：伺服臂水平、連桿垂直，臂端剛好在球頭正下方。</p>
+<h3>11.2 伺服 <code>ServoSpec</code>（DS3218，6 V）</h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sec_per_60</code></td>
+<td>0.15 s</td>
+<td>規格表的空載速度（每 60°）</td>
+</tr>
+<tr>
+<td><code>deadband_us</code></td>
+<td>3 µs</td>
+<td>死區（約 0.27°）</td>
+</tr>
+<tr>
+<td><code>pwm_hz</code></td>
+<td>333 Hz</td>
+<td>模擬用的命令更新率（PCA9685）；<strong>實機 Teensy 用 300 Hz</strong></td>
+</tr>
+<tr>
+<td><code>stall_torque</code></td>
+<td>2.0 N·m</td>
+<td>堵轉扭力（MuJoCo 馬達模型用）</td>
+</tr>
+<tr>
+<td><code>t_mech</code></td>
+<td>15 ms</td>
+<td>馬達機械時間常數（假設）</td>
+</tr>
+<tr>
+<td><code>load_derate</code></td>
+<td>0.85</td>
+<td>帶載速度打折（假設）</td>
+</tr>
+<tr>
+<td><code>t_accel</code></td>
+<td>30 ms</td>
+<td>靜止到全速的時間（假設）</td>
+</tr>
+<tr>
+<td><code>kp</code></td>
+<td>60 /s</td>
+<td>伺服內部位置迴路增益（假設）</td>
+</tr>
+<tr>
+<td><code>deadtime</code></td>
+<td>4 ms</td>
+<td>伺服內部處理延遲（假設）</td>
+</tr>
+<tr>
+<td><code>us_per_rad</code></td>
+<td>2000/π</td>
+<td>500–2500 µs 對應 180°，也就是每度 11.11 µs</td>
+</tr>
+<tr>
+<td><code>pwm_counts</code></td>
+<td>4096</td>
+<td>模擬的 PCA9685 是 12 bit；<strong>實機 Teensy 是 15 bit（32768）</strong></td>
+</tr>
+<tr>
+<td>空載轉速（算出來的）</td>
+<td>400 °/s</td>
+<td>6.98 rad/s</td>
+</tr>
+<tr>
+<td>規劃用的最高轉速（算出來的）</td>
+<td>340 °/s</td>
+<td>空載 × 0.85</td>
+</tr>
+<tr>
+<td>最大角加速度（算出來的）</td>
+<td>197.8 rad/s²</td>
+<td>最高轉速 ÷ 0.030 s</td>
+</tr>
+</tbody>
+</table>
+<p>模擬另外有 MG996R 可以切換（0.14 s/60°、死區 5 µs、50 Hz、1.08 N·m、內部延遲 8 ms），實機不用。</p>
+<h3>11.3 機構細節 <code>MechSpec</code>（只有 MuJoCo 用）</h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>plate_density</code></td>
+<td>1190 kg/m³</td>
+<td>壓克力</td>
+</tr>
+<tr>
+<td><code>plate_extra</code></td>
+<td>25 g</td>
+<td>平台上的附加物：三個球頭座、套筒、螺絲、壓電片、GY-521 和座子（CAD 估的）</td>
+</tr>
+<tr>
+<td><code>arm_mass</code></td>
+<td>8 g</td>
+<td>列印的伺服臂＋螺絲＋套筒（CAD 估的）</td>
+</tr>
+<tr>
+<td><code>rod_mass</code></td>
+<td>21 g</td>
+<td>連桿＋金屬魚眼＋軸承＋螺絲（CAD 估的）</td>
+</tr>
+<tr>
+<td><code>gear_stiffness</code></td>
+<td>50 N·m/rad</td>
+<td>伺服輸出軸剛性（假設）</td>
+</tr>
+<tr>
+<td><code>gear_damping</code></td>
+<td>0.05</td>
+<td></td>
+</tr>
+<tr>
+<td><code>backlash_deg</code></td>
+<td>0°</td>
+<td>齒隙（假設）</td>
+</tr>
+<tr>
+<td><code>motor_friction</code></td>
+<td>0.03 N·m</td>
+<td>齒輪箱摩擦（假設）</td>
+</tr>
+<tr>
+<td><code>mj_dt</code></td>
+<td>0.25 ms</td>
+<td>MuJoCo 的步長</td>
+</tr>
+</tbody>
+</table>
+<h3>11.4 球 <code>BallSpec</code>、板面 <code>SurfaceSpec</code></h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mass</code></td>
+<td>2.7 g</td>
+<td>40 mm 比賽球</td>
+</tr>
+<tr>
+<td><code>radius</code></td>
+<td>20 mm</td>
+<td></td>
+</tr>
+<tr>
+<td><code>k_inertia</code></td>
+<td>2/3</td>
+<td>薄殼球 I＝2/3·m·r²</td>
+</tr>
+<tr>
+<td><code>cd</code></td>
+<td>0.45</td>
+<td>阻力係數</td>
+</tr>
+<tr>
+<td><code>rho_air</code></td>
+<td>1.20 kg/m³</td>
+<td></td>
+</tr>
+<tr>
+<td>空氣阻力係數 β（算出來的）</td>
+<td>0.1257 /m</td>
+<td>阻力加速度＝β·|v|·v</td>
+</tr>
+<tr>
+<td>有效重力（算出來的）</td>
+<td>9.664 m/s²</td>
+<td>扣掉浮力</td>
+</tr>
+<tr>
+<td><code>e</code></td>
+<td>0.87</td>
+<td>恢復係數（假設，要量）</td>
+</tr>
+<tr>
+<td><code>mu</code></td>
+<td>0.25</td>
+<td>球和壓克力的摩擦係數（假設）</td>
+</tr>
+<tr>
+<td><code>v_rest</code></td>
+<td>0.02 m/s</td>
+<td>相對法向速度低於這個就當成非彈性（數值穩定用）</td>
+</tr>
+</tbody>
+</table>
+<h3>11.5 相機 <code>CameraSpec</code></h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>模擬預設（OV9281 的假設）</th>
+<th>替代相機（期中；紀錄規格第 13 節用的值）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fps</code></td>
+<td>120</td>
+<td>30</td>
+</tr>
+<tr>
+<td><code>latency</code>（曝光中點到結果可用）</td>
+<td>20 ms（假設）</td>
+<td>40–100 ms 都試過，主要看 60 ms（要用 LED 量）</td>
+</tr>
+<tr>
+<td><code>height</code>（鏡頭在板面上方）</td>
+<td>600 mm</td>
+<td>450 mm</td>
+</tr>
+<tr>
+<td><code>width_px</code> × <code>height_px</code></td>
+<td>1280 × 800</td>
+<td>640 × 480</td>
+</tr>
+<tr>
+<td><code>hfov_deg</code>（水平視角）</td>
+<td>100°</td>
+<td>55°</td>
+</tr>
+<tr>
+<td><code>sigma_center_px</code>（球心雜訊）</td>
+<td>0.15 px（假設）</td>
+<td>0.3 px</td>
+</tr>
+<tr>
+<td><code>sigma_radius_px</code>（半徑雜訊，決定高度誤差）</td>
+<td>0.25 px（假設）</td>
+<td>0.5 px</td>
+</tr>
+<tr>
+<td>焦距（算出來的）</td>
+<td>537 px</td>
+<td>615 px</td>
+</tr>
+</tbody>
+</table>
+<h3>11.6 壓電片 <code>PiezoSpec</code></h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>True</td>
+<td>期中實機設 False</td>
+</tr>
+<tr>
+<td><code>latency</code></td>
+<td>1 ms</td>
+<td></td>
+</tr>
+<tr>
+<td><code>jitter</code></td>
+<td>0.2 ms</td>
+<td></td>
+</tr>
+<tr>
+<td><code>min_speed</code></td>
+<td>0.10 m/s</td>
+<td>比這更輕的撞擊抓不到（假設）</td>
+</tr>
+<tr>
+<td><code>radius</code></td>
+<td>17.5 mm</td>
+<td>只用在畫圖和 MuJoCo 的外觀</td>
+</tr>
+</tbody>
+</table>
+<p>模擬裡板上任何位置都抓得到、也不會誤觸發；實機不是這樣：離中心約 7.5 cm 那圈抓不到，伺服動的時候可能誤觸發。</p>
+<h3>11.7 控制 <code>ControlSpec</code></h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rate_hz</code></td>
+<td>500 Hz</td>
+<td>控制頻率（一拍 2 ms）</td>
+</tr>
+<tr>
+<td><code>lead</code></td>
+<td>None</td>
+<td>命令提前量；None＝照伺服參數自動算 <code>1/kp + deadtime + 0.5/pwm_hz</code>（333 Hz：22.17 ms；300 Hz：22.33 ms）。實機要設（第 6.3 節）</td>
+</tr>
+<tr>
+<td><code>tilt_max_deg</code></td>
+<td>6°</td>
+<td>下沉時的傾角上限</td>
+</tr>
+<tr>
+<td><code>hit_tilt_max_deg</code></td>
+<td>10°</td>
+<td>拍球、接球撞擊時的傾角上限（2026-10-27 從 12° 改 10°：金屬魚眼只能偏 13°）</td>
+</tr>
+<tr>
+<td><code>leg_travel</code></td>
+<td>34 mm</td>
+<td>每隻腳上下最多走多少（升降＋傾斜合計）</td>
+</tr>
+<tr>
+<td><code>heave_speed_frac</code></td>
+<td>0.8</td>
+<td>規劃的升降速度上限＝伺服極限 × 這個比例（算出來 0.214 m/s）</td>
+</tr>
+<tr>
+<td><code>leg_accel_frac</code></td>
+<td>0.8</td>
+<td>規劃的腳加速度上限＝伺服極限 × 這個比例（算出來 7.12 m/s²）</td>
+</tr>
+<tr>
+<td><code>apex</code></td>
+<td>150 mm</td>
+<td>拍球的目標彈跳高度</td>
+</tr>
+<tr>
+<td><code>center_gain</code></td>
+<td>0.6</td>
+<td>拍球時每跳修正幾成的位置誤差</td>
+</tr>
+<tr>
+<td><code>hit_window</code></td>
+<td>15 ms</td>
+<td>撞擊前後各保持等速的時間</td>
+</tr>
+<tr>
+<td><code>plan_accel</code></td>
+<td>4.0 m/s²</td>
+<td>規劃揮拍時假設的平台加速度</td>
+</tr>
+<tr>
+<td><code>commit</code></td>
+<td>30 ms</td>
+<td>等速視窗開始前多久鎖定計畫</td>
+</tr>
+<tr>
+<td><code>ret_time</code></td>
+<td>150 ms</td>
+<td>撞完回到中立的時間</td>
+</tr>
+<tr>
+<td><code>cushion_ratio</code></td>
+<td>0.5</td>
+<td>緩衝時每跳高度乘上這個比例</td>
+</tr>
+<tr>
+<td><code>absorb_apex</code></td>
+<td>20 mm</td>
+<td>來球低於這個高度：這一跳整個吸掉</td>
+</tr>
+<tr>
+<td><code>rest_apex</code></td>
+<td>3 mm</td>
+<td>來球低於這個高度就不揮拍，等球自己停</td>
+</tr>
+<tr>
+<td><code>sink_speed</code></td>
+<td>40 mm/s</td>
+<td>來不及揮拍時，平台慢慢下沉的速度</td>
+</tr>
+<tr>
+<td><code>sink_depth</code></td>
+<td>12 mm</td>
+<td>最多沉到中立下方多少</td>
+</tr>
+<tr>
+<td><code>bal_wn</code></td>
+<td>3.0 rad/s</td>
+<td>平衡 PD 的自然頻率</td>
+</tr>
+<tr>
+<td><code>bal_zeta</code></td>
+<td>0.8</td>
+<td>平衡 PD 的阻尼比</td>
+</tr>
+<tr>
+<td><code>bal_tilt_max_deg</code></td>
+<td>8°</td>
+<td>平衡時的傾角上限（2026-10-26 從 5° 改 8°：手推 0.30 m/s 也救得回，精度不變）</td>
+</tr>
+<tr>
+<td><code>bal_ki</code></td>
+<td>2.0 /(m·s)</td>
+<td>自動水平：平衡時把長期偏差累積成傾斜修正</td>
+</tr>
+<tr>
+<td><code>tilt_learn</code></td>
+<td>0.15</td>
+<td>自動水平：拍球時每跳修正的比例</td>
+</tr>
+<tr>
+<td><code>apex_learn</code></td>
+<td>0.05</td>
+<td>拍球高度的外迴路（很慢地修正長期偏差）</td>
+</tr>
+<tr>
+<td><code>trim_max_deg</code></td>
+<td>2°</td>
+<td>自動水平修正的上限</td>
+</tr>
+<tr>
+<td><code>tilt_rate</code></td>
+<td>1.5 /s</td>
+<td>平衡、下沉時傾斜變化率上限（tan 值每秒，約 86°/s）</td>
+</tr>
+<tr>
+<td><code>home_speed</code></td>
+<td>20 mm/s</td>
+<td>平衡時升降回中立的速度</td>
+</tr>
+<tr>
+<td><code>e_model</code></td>
+<td>0.85</td>
+<td>控制器以為的恢復係數起始值（有壓電片時會用兩次撞擊的間隔自動校正）</td>
+</tr>
+<tr>
+<td><code>e_adapt</code></td>
+<td>True</td>
+<td>開自動校正 e</td>
+</tr>
+<tr>
+<td><code>mu_model</code></td>
+<td>0.25</td>
+<td>控制器以為的球和板的摩擦係數</td>
+</tr>
+<tr>
+<td><code>roll_factor</code></td>
+<td>0.6</td>
+<td>薄殼球滾動：加速度＝0.6·g·sinθ</td>
+</tr>
+<tr>
+<td><code>q_flight</code></td>
+<td>0.3 m/s²</td>
+<td>估測器的飛行過程雜訊</td>
+</tr>
+<tr>
+<td><code>q_roll</code></td>
+<td>0.08 m/s²</td>
+<td>估測器的滾動過程雜訊（太大會讓平衡時傾斜跟著相機雜訊抖）</td>
+</tr>
+</tbody>
+</table>
+<p>平衡 PD 換算出來的增益（<code>controller.py</code>）：kp＝<code>bal_wn</code>² ÷（0.6 × 有效重力）＝1.552，kd＝2 × <code>bal_zeta</code> × <code>bal_wn</code> ÷（0.6 × 有效重力）＝0.828。傾斜（tan 值）＝－(kp × 位置 + kd × 速度)，位置用「往前預測 lead 之後」的球位置（m），速度是 m/s。</p>
+<h3>11.8 其他</h3>
+<table>
+<thead>
+<tr>
+<th>參數</th>
+<th>值</th>
+<th>說明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Config.dt</code></td>
+<td>0.5 ms</td>
+<td>純 Python 模擬的步長</td>
+</tr>
+<tr>
+<td><code>PlantErrors</code></td>
+<td>全 0</td>
+<td>模擬「真實世界沒校正好」的伺服中位誤差和比例誤差，測自動水平校正用</td>
+</tr>
+</tbody>
+</table>
+<h3>11.9 實機（方案 A）的數字</h3>
+<table>
+<thead>
+<tr>
+<th>項目</th>
+<th>值</th>
+<th>出處</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PWM</td>
+<td>300 Hz、15 bit，每格約 0.102 µs</td>
+<td>第 5.2 節</td>
+</tr>
+<tr>
+<td>脈寬範圍</td>
+<td>絕對 500–2500 µs；中位約 1500 ± 80 µs（每顆要量）</td>
+<td>BOM、清單 3-3</td>
+</tr>
+<tr>
+<td>每度幾 µs</td>
+<td>標稱 11.11（180° 版），每顆往上、往下各量一次</td>
+<td>清單 3-4</td>
+</tr>
+<tr>
+<td>斷線回中位</td>
+<td>0.2 秒沒命令開始，1 秒內回到中位（建議）</td>
+<td>第 5.3 節</td>
+</tr>
+<tr>
+<td>IMU</td>
+<td>0x68、400 kHz（出錯降 100 kHz），讀的頻率 100–250 Hz（建議）</td>
+<td>第 5.5 節</td>
+</tr>
+<tr>
+<td>壓電片</td>
+<td>第 14 腳、中斷記 <code>micros()</code></td>
+<td>第 5.4 節</td>
+</tr>
+<tr>
+<td>控制</td>
+<td>500 Hz、高優先權、空轉等</td>
+<td>第 6.1 節</td>
+</tr>
+<tr>
+<td>提前量</td>
+<td>22.33 ms＋USB 單程延遲</td>
+<td>第 6.3 節</td>
+</tr>
+<tr>
+<td>對時</td>
+<td>每 20–100 ms 一個 ping，用最近 10–60 秒擬合</td>
+<td>第 6.3 節</td>
+</tr>
+<tr>
+<td>pyserial</td>
+<td><code>write_timeout</code> 5–10 ms、不 <code>flush()</code>、專門讀的執行緒</td>
+<td>第 6.2 節</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>12. 模擬結果（現在的參數，2026-10-27）</h2>
+<h3>12.1 期中：平衡、手推（照 <code>tests/test_control.py</code>、<code>tests/test_mujoco.py</code> 的情境）</h3>
+<p>相機是模擬預設（OV9281 的假設：每秒 120 張、延遲 20 ms），平衡傾角上限 8°。</p>
+<table>
+<thead>
+<tr>
+<th>情境</th>
+<th>結果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>純 Python：球靜止放在離中心 3.6 cm（x 30、y −20 mm），跑 24 秒</td>
+<td>沒掉；4 秒後離中心最遠 1.4 mm；10 秒後 RMS 0.14 mm</td>
+</tr>
+<tr>
+<td>純 Python：球停在中心，第 2 秒被推成 0.25 m/s，8 個方向</td>
+<td>8/8 沒掉；最遠滾到離中心 67 mm；2.3 秒回到 1 cm 內；推完 3 秒後最遠 6.9 mm</td>
+</tr>
+<tr>
+<td>純 Python：同上，0.30 m/s</td>
+<td>8/8 沒掉；最遠 88 mm（平台半徑 99 mm）；2.4 秒回到 1 cm 內；推完 3 秒後最遠 7.2 mm</td>
+</tr>
+<tr>
+<td>MuJoCo：放偏 3.6 cm 拉回，第 5 秒往正面推成 0.25 m/s</td>
+<td>沒掉；最遠 67 mm；推完 3 秒後最遠 5.9 mm</td>
+</tr>
+</tbody>
+</table>
+<p>推到 0.35 m/s 以上會掉（2026-10-26 試算，平台只有 Ø198）。平衡傾角上限 10° 沒有比 8° 好。</p>
+<h3>12.2 期中用替代相機能期待什麼（紀錄規格第 13 節，純 Python，2026-10-27）</h3>
+<p>球停在中心，第 2 秒被推成貼著板面滾的速度 v（8 個方向），換 3 組亂數。替代相機：640×480、每秒 30 張、水平 55°、架在板面上方 45 cm、球心雜訊 0.3 px、半徑雜訊 0.5 px。檢查員另外寫程式重跑過（360 次）。</p>
+<table>
+<thead>
+<tr>
+<th>推的速度</th>
+<th>延遲 40 ms</th>
+<th>60 ms</th>
+<th>80 ms</th>
+<th>100 ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.20 m/s</td>
+<td>8/8 沒掉，3.5 s（只跑種子 1）</td>
+<td>24/24 沒掉，3.6 s 回到 1 cm 內</td>
+<td>8/8，3.7 s（只跑種子 1）</td>
+<td>24/24 沒掉，4.9 s</td>
+</tr>
+<tr>
+<td>0.25 m/s（傾角上限 8°）</td>
+<td>21/24 沒掉</td>
+<td>13/24（其中 10 次擦到板邊）</td>
+<td>0/24</td>
+<td>0/24</td>
+</tr>
+<tr>
+<td>0.25 m/s（傾角上限 12°）</td>
+<td>24/24</td>
+<td>20/24</td>
+<td>9/24（都擦邊）</td>
+<td>0/24</td>
+</tr>
+</tbody>
+</table>
+<ol>
+<li>預設相機（OV9281 的假設：每秒 120 張、延遲 20 ms）推 0.25 m/s：8/8，2.3 秒回到 1 cm 內。</li>
+<li>「3 秒內回到 1 cm 內」這個標準，替代相機每一格都沒過，所以替代相機改成「不掉、5 秒內回到 1 cm 內」，期中用這顆相機時推輕一點。</li>
+<li>每秒張數和延遲都有影響：每秒 30 張、延遲 20 ms 時推 0.30 m/s 全掉（每秒 120 張時全救回）。</li>
+<li>把平衡參數調軟（<code>bal_wn</code> 2.0、2.5）更糟：球滾得更遠、更容易掉。</li>
+<li>模擬的掉落判定偏寬：要球心超過板邊<strong>而且</strong>比板面低 2 cm 才算掉。球心過了約 96 mm 其實已經在擦板邊，所以 0.25 m/s 那幾格的「沒掉」偏樂觀。</li>
+<li><strong>延遲怎麼補償影響很大，寫控制程式時要查</strong>：模擬裡估測器拿到每張的精確拍攝時間。檢查員改成「把收到的時間當拍攝時間」（完全不補償）時，推 0.20 m/s 反而 1.9–2.2 秒就回來；但推 0.25 m/s 變差（60 ms 只剩 7/24）。表示估測器在每秒 30 張時往前預測 60–100 ms 可能有問題。</li>
+</ol>
+<h3>12.3 期末：接球、拍球、側拋</h3>
+<p>純 Python（每格 4 組隨機丟球：高度 20–35 cm、位置 ±4 cm、水平初速 ±8 cm/s）：</p>
+<table>
+<thead>
+<tr>
+<th>設定</th>
+<th>接球</th>
+<th>接到平衡</th>
+<th>拍球</th>
+<th>拍球高度（目標 15 cm）</th>
+<th>落點離中心最多</th>
+<th>撞擊時間誤差最大</th>
+<th>伺服轉速最高</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DS3218＋壓電片</td>
+<td>4/4</td>
+<td>1.99 s</td>
+<td>4/4</td>
+<td>14.9 cm</td>
+<td>14 mm</td>
+<td>24 ms</td>
+<td>78%</td>
+</tr>
+<tr>
+<td>DS3218、沒有壓電片</td>
+<td>4/4</td>
+<td>1.75 s</td>
+<td>4/4</td>
+<td>15.2 cm</td>
+<td>14 mm</td>
+<td>32 ms</td>
+<td>79%</td>
+</tr>
+</tbody>
+</table>
+<p>能拍多高（純 Python，DS3218＋壓電片，拍 6 秒）：目標 15、20、25、30 cm，實際 15.0、19.8、24.9、27.2 cm，都是 4/4。30 cm 時撞擊速度頂到上限。</p>
+<p>MuJoCo（同一套控制器，真實世界換成多體動力學）：接球 4/4、2.05 s 接到平衡；拍球 4/4、14.4 cm。馬達扭力峰值是堵轉的 38%（RMS 8%）、驅動從沒全開、轉速峰值 68% 空載：<strong>瓶頸是轉速，不是扭力</strong>。球頭最大受力 3.1 N。壓電片自動校正 e：起始 0.85，21 跳後估到 0.871（MuJoCo 接觸實際約 0.870）。</p>
+<p>MuJoCo 的敏感度（每種狀況接球、拍球各 4 組，都是 4/4）：伺服加速慢一倍、齒隙 1°、平台重一倍、換 MG996R 都還能用。伺服中位偏 (+1°, −1°, +0.5°) 時，不做自動水平校正，落點系統性偏移 23.9 mm、平衡最後離中心 9.4 mm；做自動校正後是 4.5 mm、1.8 mm。</p>
+<p>側拋（從正面或背面拋弧線，最高點離板面 35 cm，落點在中心 ±2 cm）：</p>
+<table>
+<thead>
+<tr>
+<th>世界</th>
+<th>出手距離 30 cm（水平 0.74 m/s）</th>
+<th>45 cm（1.12 m/s）</th>
+<th>60 cm（1.51 m/s）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>純 Python，100° 廣角</td>
+<td>4/4</td>
+<td>3/4</td>
+<td>0/4</td>
+</tr>
+<tr>
+<td>純 Python，60° 鏡頭</td>
+<td>4/4</td>
+<td>0/4</td>
+<td>0/4</td>
+</tr>
+<tr>
+<td>MuJoCo，100° 廣角</td>
+<td>4/4</td>
+<td>0/4</td>
+<td>0/4</td>
+</tr>
+</tbody>
+</table>
+<p>側拋只從正面或背面來，剛好是相機畫面的短邊。相機轉 90° 裝（長邊朝正背面）的話，45 cm 純 Python、MuJoCo 都是 8/8（2026-10-26 試算；模擬的預設還沒改，等使用者決定相機怎麼裝）。</p>
+<h3>12.4 模擬沒有涵蓋的（實機要自己量）</h3>
+<ol>
+<li>USB 傳輸的時間（提前量的公式裡沒有這一項）。</li>
+<li>Windows 的排程抖動和偶爾卡頓（模擬假設 500 Hz 的控制迴圈每一拍都準時）。</li>
+<li>壓電片時間戳跟筆電對時的誤差。</li>
+<li>相機延遲、曝光拖影、捲簾快門（替代相機）。</li>
+<li>恢復係數 e、球和板的摩擦、伺服的加速時間、延遲、齒隙（<code>params.py</code> 標「假設」的那些）。</li>
+</ol>
+<hr />
+<h2>13. 已知的坑（一張表看完）</h2>
+<table>
+<thead>
+<tr>
+<th>哪裡</th>
+<th>坑</th>
+<th>怎麼辦</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows 優先權</td>
+<td>ctypes 型別沒設，<code>SetPriorityClass</code> 靜靜失敗</td>
+<td>設好 HANDLE、DWORD，讀回確認</td>
+</tr>
+<tr>
+<td>Python 執行緒</td>
+<td>控制和找球同一個程式會搶 GIL，晚拍幾十 ms</td>
+<td>分成兩個程式</td>
+</tr>
+<tr>
+<td>等下一拍</td>
+<td><code>time.sleep</code> 在 Windows 上最壞幾十 ms</td>
+<td>高優先權＋空轉</td>
+</tr>
+<tr>
+<td>pyserial</td>
+<td><code>write</code> 預設會等；<code>flush()</code> 沒有逾時</td>
+<td><code>write_timeout</code>、迴圈裡不 <code>flush()</code></td>
+</tr>
+<tr>
+<td>Teensy 送資料</td>
+<td>筆電沒讀時 <code>Serial.write()</code> 卡 120 ms 再丟資料；不 <code>send_now()</code> 要等 75 µs</td>
+<td>先看 <code>availableForWrite()</code>、寫完 <code>send_now()</code>、筆電一直讀</td>
+</tr>
+<tr>
+<td><code>micros()</code></td>
+<td>約 71.6 分鐘繞回 0</td>
+<td>換算前先接起來</td>
+</tr>
+<tr>
+<td>提前量</td>
+<td>設了 <code>control.lead</code> 就不會再自動算</td>
+<td>設成公式值＋USB 單程延遲</td>
+</tr>
+<tr>
+<td>相機</td>
+<td>筆電內建鏡頭會拍到人</td>
+<td>只開 PC CAMERA</td>
+</tr>
+<tr>
+<td>替代相機</td>
+<td>自動曝光會掉到每秒 10–12 張</td>
+<td><code>--exposure -7</code></td>
+</tr>
+<tr>
+<td>OV9281</td>
+<td>DSHOW 沒指定會選 YUY2；設定順序錯格式會被洗掉</td>
+<td>明講 MJPG，最後才設 FOURCC，讀回確認</td>
+</tr>
+<tr>
+<td>IMU</td>
+<td>零點誤差可達 ±50 mg（約 2.9°）</td>
+<td>用手機轉 180° 校（A7）</td>
+</tr>
+<tr>
+<td>DS3218</td>
+<td>吃不吃 3.3 V 訊號沒人知道</td>
+<td>A3-4 實測，不行加 74AHCT125</td>
+</tr>
+<tr>
+<td>第一次通電</td>
+<td>直接送中位，伺服全速轉 60°，把平台彈起來</td>
+<td>先送收合位置、開電、再慢慢展開</td>
+</tr>
+<tr>
+<td>估測器</td>
+<td>每秒 30 張時往前預測 60–100 ms 可能有問題</td>
+<td>寫控制程式時查（第 12.2 節第 6 點）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>14. 這包裡有什麼</h2>
+<pre><code>plan-a-handoff/
+  README.md                     這份文件
+  img/
+    balance_push_mj.gif         MuJoCo：放偏拉回＋手推（第 1.4 節）
+    push_subcam_py.gif          純 Python：替代相機的手推
+    catch_py.gif                純 Python：從上方丟下、緩衝接住
+    juggle_mj.gif               MuJoCo：拍球
+    system_teensy.png           方案 A 的系統圖
+    wiring_teensy.png           方案 A 的接線圖
+    上機編號圖.svg              俯視的伺服編號、正面、GY-521 位置
+  量測程式/                     2026-10-26 寫的量測程式（第 9 節 A1、A8）
+    latency_test/latency_test.ino   Teensy：USB 來回延遲（原封不動送回＋micros()）
+    usb_rtt.py                      筆電：配上面那個，量延遲和對時
+    loop_timing.py                  筆電：500 Hz 迴圈三種等法
+    loop_gil.py                     筆電：同一個程式的執行緒 vs 另一個程式
+  參考文件/
+    硬體上機檢查清單.md         樹莓派版的上機清單（第 3 階段以後照做）
+    2026-10-27-測試紀錄與監控-design.md   紀錄、校正檔、程式分工的規格
+    img/上機編號圖.svg          清單用的圖
+  code/                         專案程式快照（沒有 CAD）
+    ppsim/                      模擬：控制器、估測器、運動學、兩種真實世界
+    ppreal/                     實機工具：相機、找球、紀錄、報告
+    tests/                      116 個測試
+    run.py                      模擬的指令入口（python run.py catch｜juggle｜compare｜live…）
+</code></pre>
+<ul>
+<li>在 <code>code/</code> 裡跑：<code>python -m pytest -q tests</code>（全部測試），<code>python run.py live</code>（MuJoCo 即時視窗，按 7 丟球、8 側拋、9 拍球開關）。</li>
+<li>模擬的參數全部在 <code>code/ppsim/params.py</code>，結構說明在每個檔案開頭的說明字串。</li>
+</ul>
